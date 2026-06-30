@@ -112,6 +112,69 @@ pyATF provides the following pre-implemented cost functions:
 
     Silences log messages.
 
+.. py:class:: pyatf.cost_functions.dpcpp.CostFunction
+
+  Compiles and runs a self-contained SYCL program with DPC++, ahead-of-time, for a
+  given target GPU architecture. Unlike the OpenCL/CUDA cost functions, the program
+  passed in is a whole host+device translation unit (SYCL is single-source), not
+  just a kernel string -- it owns its own data setup, timing and result checking,
+  and reports a cost back either as the wall time of running it or via a cost file.
+
+  .. py:function:: CostFunction(source: str)
+
+    :param source: Self-contained SYCL program source as string; function :code:`pyatf.cost_functions.dpcpp.path( path: str )` can be used to extract source code from file.
+
+  .. py:function:: target(target: str)
+
+    Selects compiler flags for a known GPU from a built-in table (currently
+    :code:`'intel:pvc'`, :code:`'nvidia:sm_70'`, :code:`'nvidia:sm_80'`,
+    :code:`'nvidia:sm_89'`, :code:`'nvidia:sm_120'`, :code:`'amd:gfx90a'`). For
+    NVIDIA targets, also adds :code:`--cuda-path=$CUDA_PATH` if that environment
+    variable is set.
+
+  .. py:function:: target_flags(flags: Iterable[str])
+
+    Raw ahead-of-time target flags, for hardware not in the :code:`target()` table.
+
+  .. py:function:: compiler(compiler: str)
+
+    Compiler executable to invoke (default :code:`'clang++'`).
+
+  .. py:function:: flags(flags: Iterable[str])
+
+    Additional compiler flags.
+
+  .. py:function:: cost_file(cost_file: str)
+
+    Path to cost file containing cost as string (must be convertible to :code:`pyatf.tuning_data.Cost`). If not set, cost is the wall time of running the compiled program.
+
+.. py:class:: pyatf.cost_functions.acpp.CostFunction
+
+  Compiles and runs a self-contained SYCL program with AdaptiveCpp's generic SSCP
+  flow, which JIT-compiles the device code at first launch for whatever GPU it
+  finds -- the same program runs unmodified on NVIDIA/AMD/Intel, no per-vendor
+  target needed. Otherwise shaped like :code:`dpcpp.CostFunction`.
+
+  .. py:function:: CostFunction(source: str)
+
+    :param source: Self-contained SYCL program source as string; function :code:`pyatf.cost_functions.acpp.path( path: str )` can be used to extract source code from file.
+
+  .. py:function:: targets(acpp_targets: str)
+
+    ACPP compilation flow, passed as :code:`--acpp-targets=<acpp_targets>` (default :code:`'generic'`).
+
+  .. py:function:: compiler(compiler: str)
+
+    Compiler executable to invoke (default :code:`'acpp'`).
+
+  .. py:function:: flags(flags: Iterable[str])
+
+    Additional compiler flags.
+
+  .. py:function:: cost_file(cost_file: str)
+
+    Path to cost file containing cost as string (must be convertible to :code:`pyatf.tuning_data.Cost`). If not set, cost is the wall time of running the compiled program.
+
 Misc
 ----
 
