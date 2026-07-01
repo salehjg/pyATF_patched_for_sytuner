@@ -3,3 +3,4 @@ dist/
 build/
 venv/
 dir_dumps/
+__pycache__/

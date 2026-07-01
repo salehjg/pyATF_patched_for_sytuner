@@ -22,11 +22,13 @@ def path(path: str):
 # NVIDIA/AMD need the CUDA/HIP codegen backends, and those are ahead-of-time only.
 _TARGETS = {
     'intel:pvc':     ('spir64_gen',         ['-Xsycl-target-backend', '-device pvc']),
+    'intel:dg2':     ('spir64_gen',         ['-Xsycl-target-backend', '-device dg2']),  # Arc A770 (DG2/Alchemist)
     'nvidia:sm_70':  ('nvptx64-nvidia-cuda', ['-Xsycl-target-backend=nvptx64-nvidia-cuda', '--cuda-gpu-arch=sm_70']),
     'nvidia:sm_80':  ('nvptx64-nvidia-cuda', ['-Xsycl-target-backend=nvptx64-nvidia-cuda', '--cuda-gpu-arch=sm_80']),
     'nvidia:sm_89':  ('nvptx64-nvidia-cuda', ['-Xsycl-target-backend=nvptx64-nvidia-cuda', '--cuda-gpu-arch=sm_89']),
     'nvidia:sm_120': ('nvptx64-nvidia-cuda', ['-Xsycl-target-backend=nvptx64-nvidia-cuda', '--cuda-gpu-arch=sm_120']),
     'amd:gfx90a':    ('amdgcn-amd-amdhsa',   ['-Xsycl-target-backend=amdgcn-amd-amdhsa', '--offload-arch=gfx90a']),
+    'amd:gfx908':    ('amdgcn-amd-amdhsa',   ['-Xsycl-target-backend=amdgcn-amd-amdhsa', '--offload-arch=gfx908']),  # MI100
 }
 
 
