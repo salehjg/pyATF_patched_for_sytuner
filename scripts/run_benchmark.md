@@ -70,24 +70,47 @@ The allowed-core count is read **live** from the process affinity mask
 no per-machine core count is hardcoded. A non-contiguous mask (e.g.
 `0-3,32-35`) is honored exactly.
 
-### 4. Single-GPU device pinning
+### 4. acpp backend confinement (every machine)
+
+AdaptiveCpp otherwise probes **all** backends at startup and prints alarming
+warnings for the ones a host doesn't have — most visibly a burst of
+`ze_backend: Call to zeInit() failed` on an NVIDIA box. Each machine's
+`device_kind` (`cuda` | `hip` | `level_zero`) sets `ACPP_VISIBILITY_MASK`
+(`cuda` | `hip` | `ze`) for the **acpp** runs, confining it to this GPU's
+backend so that noise disappears. dpcpp reads its own selector, so the mask is
+set for acpp only.
+
+### 5. Single-GPU device pinning
 
 The benchmark C++ uses `sycl::gpu_selector_v`, which already picks exactly one
-device — so **single-GPU hosts need no masking**.
+device — so **single-GPU hosts need no positional masking**.
 
 `lrz` is the exception: 4 Max 1550 cards, each exposing 2 tiles = 8 Level Zero
 devices. The preset pins the run to a **single tile** under a deterministic
 `FLAT` hierarchy (every tile is its own root device), device 0. Because the two
 SYCL runtimes read different knobs, the launcher sets them per compiler:
 
-| Compiler | Environment |
+| Compiler | Environment (lrz) |
 |---|---|
-| acpp  | `ZE_FLAT_DEVICE_HIERARCHY=FLAT`, `ZE_AFFINITY_MASK=0`, `ACPP_VISIBILITY_MASK=ze` |
+| acpp  | `ACPP_VISIBILITY_MASK=ze`, `ZE_FLAT_DEVICE_HIERARCHY=FLAT`, `ZE_AFFINITY_MASK=0` |
 | dpcpp | `ZE_FLAT_DEVICE_HIERARCHY=FLAT`, `ONEAPI_DEVICE_SELECTOR=level_zero:0` |
 
 These are exported into the benchmark subprocess and inherited by the compiled
 program it runs. This mirrors `benchmarks/scripts/runme_common.py`'s
 `device_env` in the SyTuner tree.
+
+## dpcpp toolchain fix (`--gcc-install-dir`)
+
+Separately from the presets, `pyatf/cost_functions/dpcpp.py` now auto-discovers
+the gcc install dir (`g++ -print-file-name=crtbegin.o` → its parent) and passes
+`--gcc-install-dir=<dir>` to every clang++ compile. The Intel/LLVM `clang++`
+does **not** find a conda-provided gcc on its own — its default GCC scan doesn't
+reach `$CONDA_PREFIX/.../x86_64-conda-linux-gnu` — so without this flag even
+`#include <type_traits>` fails and every dpcpp evaluation errors out
+(`min_cost=None`). This is discovered once per `CostFunction` and is a no-op if
+no usable `g++` is on `PATH`. It complements the existing `--cuda-path` and
+`/compat` `LD_LIBRARY_PATH` handling in the same file, and mirrors
+`runme_common`'s `_gcc_install_dir` in the SyTuner tree.
 
 > **Why a tile, not a whole card?** A `gpu_selector` picks one device = one
 > tile under `FLAT`, giving a clean single-compute-tile measurement, and the

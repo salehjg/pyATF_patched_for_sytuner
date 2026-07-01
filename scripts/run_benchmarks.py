@@ -73,19 +73,19 @@ BENCHMARKS = [
 #     multi-GPU hosts get a 1/num_gpus slice via taskset, so a run doesn't
 #     oversubscribe cores that a peer job on another GPU would want. See
 #     docs/notes/cpu-core-pinning-taskset.md.
-# 'level_zero' marks the Intel multi-device hosts that also need explicit
-# single-GPU device pinning (see device_env); single-GPU hosts need none
-# (sycl::gpu_selector_v has only one choice).
+# 'device_kind' ('cuda'|'hip'|'level_zero') confines AdaptiveCpp to this host's
+# backend (see device_env) and marks which hosts need explicit single-GPU
+# pinning (only multi-device Level Zero, i.e. lrz).
 MACHINES = {
-    'furore':   dict(dpcpp_target='nvidia:sm_70',  num_gpus=1),                    # Tesla V100S (Volta)
-    'ravello':  dict(dpcpp_target='amd:gfx908',    num_gpus=1),                    # Instinct MI100
-    'p16g2':    dict(dpcpp_target='nvidia:sm_89',  num_gpus=1),                    # RTX 2000 Ada
-    'darkserv': dict(dpcpp_target='nvidia:sm_120', num_gpus=1),                    # RTX 5060 Ti (Blackwell)
-    'albori':   dict(dpcpp_target='intel:dg2',     num_gpus=1),                    # Arc A770 (DG2/Alchemist)
+    'furore':   dict(device_kind='cuda',       dpcpp_target='nvidia:sm_70',  num_gpus=1),  # Tesla V100S (Volta)
+    'ravello':  dict(device_kind='hip',        dpcpp_target='amd:gfx908',    num_gpus=1),  # Instinct MI100
+    'p16g2':    dict(device_kind='cuda',       dpcpp_target='nvidia:sm_89',  num_gpus=1),  # RTX 2000 Ada
+    'darkserv': dict(device_kind='cuda',       dpcpp_target='nvidia:sm_120', num_gpus=1),  # RTX 5060 Ti (Blackwell)
+    'albori':   dict(device_kind='level_zero', dpcpp_target='intel:dg2',     num_gpus=1),  # Arc A770 (DG2/Alchemist)
     # 4x Data Center GPU Max 1550 (Ponte Vecchio), each exposing 2 tiles => 8
     # level_zero devices. We pin to a SINGLE tile (FLAT hierarchy, device 0) and
     # take 1/8 of the cores.
-    'lrz':      dict(dpcpp_target='intel:pvc',     num_gpus=8, level_zero=True),
+    'lrz':      dict(device_kind='level_zero', dpcpp_target='intel:pvc',     num_gpus=8),
 }
 
 
@@ -134,19 +134,30 @@ def core_cpuset(num_gpus):
 
 
 def device_env(machine_cfg, compiler):
-    """Environment that pins the benchmark (and its compiled program) to a
-    single GPU. Returns a full env dict to hand to subprocess.
+    """Environment for the benchmark (and its compiled program). Returns a full
+    env dict to hand to subprocess. Mirrors runme_common.device_env.
 
-    Single-GPU hosts need nothing -- sycl::gpu_selector_v already has one
-    choice. Level Zero (Max 1550) is multi-device, so pin device 0 under a FLAT
-    hierarchy (each tile its own root device): AdaptiveCpp honors
-    ZE_AFFINITY_MASK, DPC++ its own ONEAPI_DEVICE_SELECTOR. Mirrors
-    runme_common.device_env."""
+    Two things happen here:
+
+    * acpp backend confinement (every machine). AdaptiveCpp otherwise probes
+      ALL backends and prints scary warnings for the ones this host lacks --
+      e.g. the Level Zero ``zeInit() failed`` lines on an NVIDIA box.
+      ACPP_VISIBILITY_MASK pins it to just this GPU's backend. (Harmless for
+      dpcpp, which reads its own selector, so we only set it for acpp.)
+
+    * single-GPU pinning (multi-device Level Zero only, i.e. lrz). Pin device 0
+      under a deterministic FLAT hierarchy (each tile its own root device):
+      AdaptiveCpp honors ZE_AFFINITY_MASK, DPC++ its own ONEAPI_DEVICE_SELECTOR.
+      Single-GPU hosts need nothing -- sycl::gpu_selector_v already has one
+      choice.
+    """
     env = os.environ.copy()
-    if machine_cfg.get('level_zero'):
+    device_kind = machine_cfg.get('device_kind')
+    if compiler == 'acpp' and device_kind:
+        env['ACPP_VISIBILITY_MASK'] = {'cuda': 'cuda', 'hip': 'hip', 'level_zero': 'ze'}[device_kind]
+    if device_kind == 'level_zero' and machine_cfg.get('num_gpus', 1) > 1:
         env['ZE_FLAT_DEVICE_HIERARCHY'] = 'FLAT'
         if compiler == 'acpp':
-            env['ACPP_VISIBILITY_MASK'] = 'ze'
             env['ZE_AFFINITY_MASK'] = '0'
         else:  # dpcpp
             env['ONEAPI_DEVICE_SELECTOR'] = 'level_zero:0'

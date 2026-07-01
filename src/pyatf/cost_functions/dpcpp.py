@@ -32,6 +32,34 @@ _TARGETS = {
 }
 
 
+def _gcc_install_dir() -> Optional[str]:
+    """The GCC install dir (the directory holding crtbegin.o) of the g++ on
+    PATH, asked from g++ itself.
+
+    The Intel/LLVM clang++ does NOT auto-discover a conda gcc: it lives under
+    $CONDA_PREFIX with the x86_64-conda-linux-gnu triple, outside clang's
+    default GCC scan (clang's sysroot is its own llvm install dir). Without
+    help, clang finds no C++ toolchain at all and the SYCL headers fail to
+    locate even <type_traits>. Hand clang the exact install dir, asked from gcc
+    itself so there is no version/triple to hardcode.
+
+    Returns None if g++ is absent or the runtime object can't be found (then no
+    flag is added -- identical to the old behavior). Mirrors
+    runme_common.BenchmarkRunner._gcc_install_dir in the SyTuner tree.
+    """
+    gxx = shutil.which('g++')
+    if not gxx:
+        return None
+    try:
+        out = subprocess.run([gxx, '-print-file-name=crtbegin.o'],
+                             capture_output=True, text=True, check=True).stdout.strip()
+    except Exception:
+        return None
+    crt = Path(out)
+    # -print-file-name echoes the bare name back when it can't locate the file.
+    return str(crt.parent.resolve()) if crt.is_file() else None
+
+
 def _runtime_env(target: Optional[str]):
     # nvhpc's CUDA forward-compat libcuda.so is older than the real driver and
     # shadows it on LD_LIBRARY_PATH, which makes device init fail with
@@ -55,6 +83,12 @@ class CostFunction:
         self._target_flags = []
         self._extra_flags = []
         self._cost_file: Optional[str] = None
+        # Point clang at the (conda) gcc toolchain once -- it can't find one on
+        # its own, so without this even <type_traits> fails to resolve. Empty if
+        # no usable g++ is on PATH (then the compile is unchanged). See
+        # _gcc_install_dir.
+        gcc_dir = _gcc_install_dir()
+        self._toolchain_flags = [f'--gcc-install-dir={gcc_dir}'] if gcc_dir else []
 
         self._workdir = tempfile.mkdtemp(prefix='pyatf_dpcpp_')
 
@@ -94,7 +128,8 @@ class CostFunction:
         src_path.write_text(self._source)
 
         # -fuse-ld=lld dodges a glibc/conda toolchain conflict in the default linker
-        argv = [self._compiler, '-fsycl', '-fuse-ld=lld', *self._target_flags, *self._extra_flags]
+        argv = [self._compiler, '-fsycl', '-fuse-ld=lld',
+                *self._toolchain_flags, *self._target_flags, *self._extra_flags]
         for tp_name, tp_value in configuration.items():
             argv.append(f'-D{tp_name}={tp_value}')
         argv += [str(src_path), '-o', str(bin_path)]
