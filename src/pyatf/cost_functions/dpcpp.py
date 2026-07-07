@@ -1,3 +1,4 @@
+import functools
 import os
 import shutil
 import subprocess
@@ -60,13 +61,59 @@ def _gcc_install_dir() -> Optional[str]:
     return str(crt.parent.resolve()) if crt.is_file() else None
 
 
+@functools.lru_cache(maxsize=None)
+def _kernel_driver_major() -> Optional[int]:
+    """Major version of the host's NVIDIA kernel driver (via nvidia-smi), or
+    None when there is no nvidia-smi / no GPU / unparseable output. Cached --
+    the kernel driver cannot change mid-run."""
+    smi = shutil.which('nvidia-smi')
+    if not smi:
+        return None
+    try:
+        out = subprocess.run([smi, '--query-gpu=driver_version', '--format=csv,noheader'],
+                             capture_output=True, text=True, check=True).stdout
+        return int(out.strip().splitlines()[0].split('.')[0])
+    except Exception:
+        return None
+
+
+def _keep_forward_compat(compat_dir: str) -> bool:
+    """True iff the CUDA forward-compat libcuda in `compat_dir` is one this
+    host NEEDS: the kernel driver is strictly OLDER than the compat UMD (the
+    data-center forward-compat case, e.g. Leonardo A100 @ driver 535, whose
+    system libcuda lacks cuGraphAddNode_v2 -- without the compat lib the SYCL
+    CUDA UR adapter cannot load at all). With a kernel driver >= the compat
+    UMD the compat lib itself fails cuInit with
+    CUDA_ERROR_SYSTEM_DRIVER_MISMATCH (803), so it must be dropped. Mirrors
+    the gate in SyTuner's setvars.sh / generated setvars.all.sh."""
+    kmd = _kernel_driver_major()
+    if kmd is None:
+        return False
+    try:
+        # e.g. libcuda.so.1 -> libcuda.so.575.57.08
+        name = (Path(compat_dir) / 'libcuda.so.1').resolve(strict=True).name
+    except OSError:
+        return False
+    prefix = 'libcuda.so.'
+    if not name.startswith(prefix):
+        return False
+    try:
+        umd = int(name[len(prefix):].split('.')[0])
+    except ValueError:
+        return False
+    return kmd < umd
+
+
 def _runtime_env(target: Optional[str]):
-    # nvhpc's CUDA forward-compat libcuda.so is older than the real driver and
-    # shadows it on LD_LIBRARY_PATH, which makes device init fail with
-    # CUDA_ERROR_SYSTEM_DRIVER_MISMATCH -- strip it so the real one is used
+    # nvhpc's CUDA forward-compat libcuda: keep it on LD_LIBRARY_PATH only when
+    # this host actually needs it (kernel driver older than the compat UMD --
+    # see _keep_forward_compat); everywhere else it shadows the real kernel
+    # driver and device init fails with CUDA_ERROR_SYSTEM_DRIVER_MISMATCH (803)
     env = os.environ.copy()
     ld_library_path = env.get('LD_LIBRARY_PATH', '')
-    env['LD_LIBRARY_PATH'] = ':'.join(p for p in ld_library_path.split(':') if not p.endswith('/compat'))
+    env['LD_LIBRARY_PATH'] = ':'.join(
+        p for p in ld_library_path.split(':')
+        if not p.rstrip('/').endswith('/compat') or _keep_forward_compat(p))
     # without this, the SYCL device enumeration can pick the wrong backend and
     # fail with CUDA_ERROR_INVALID_DEVICE even though the device is fine
     if target is not None and target.startswith('nvidia:'):
