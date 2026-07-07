@@ -25,9 +25,50 @@ launcher keeps its old defaults (`nvidia:sm_89`, all cores, no GPU pinning).
 | `darkserv` | RTX 5060 Ti (Blackwell)    | `nvidia:sm_120` | `generic` | all | — |
 | `albori`   | Arc A770 (DG2/Alchemist)   | `intel:dg2`     | `generic` | all | — |
 | `lrz`      | 4× Data Center GPU Max 1550 (Ponte Vecchio) | `intel:pvc` | `generic` | total ÷ 8 | one tile (`FLAT`, device 0) |
+| `leonardo` | A100 (Ampere), 1-GPU slice | `nvidia:sm_80`  | `generic` | all allocated | — (SLURM exposes one GPU) |
 
 The table lives in `MACHINES` at the top of `run_benchmarks.py`; add a host by
 adding a row.
+
+## Running under SLURM (`sbatch`)
+
+Two ready-made batch scripts run the whole suite to completion in a single
+allocation (no campaign/resume machinery):
+
+| Script | Host | `--machine` |
+|---|---|---|
+| `scripts/sbatch.lrz.max1550.sh`  | LRZ Intel Max 1550 node | `lrz` |
+| `scripts/sbatch.leonardo.a100.sh`| CINECA Leonardo A100 node | `leonardo` |
+
+Each one exports `MACHINE=<host>`, sources the SyTuner-tree `setvars.sh` (three
+levels up — brings up the toolchain and the conda Python env), then execs
+`run_benchmarks.py --machine <host>`. Submit from this `scripts/` dir and pass
+the project account:
+
+```bash
+sbatch --account=<PROJECT> sbatch.leonardo.a100.sh
+sbatch --account=<PROJECT> sbatch.lrz.max1550.sh --max-fevals 10 --runs 1  # smoke
+```
+
+Extra args after the script are forwarded to `run_benchmarks.py`. The same
+scripts also run **without SLURM** — invoke one directly (`./sbatch.lrz.max1550.sh`)
+and the `#SBATCH` lines are ignored as plain comments, so `setvars.sh` + the run
+happen exactly as they would in a batch job. Override the SyTuner root with
+`SYTUNER_ROOT=...` if your checkout layout differs.
+
+**Resource sizing.** The two hosts allocate differently because their sites bill
+differently:
+
+- **`leonardo`** requests a **1/4-node slice** — `--gres=gpu:1 --cpus-per-task=8
+  --mem=120G`, no `--exclusive`. The suite only ever uses one A100, and CINECA
+  bills the *max* of the (GPU, CPU, memory) node-fractions, so a 1-GPU slice
+  costs 1/4 of a node-hour, not a whole one. The `leonardo` preset is
+  `num_gpus=1` so `run_benchmarks.py` uses all 8 SLURM-allocated cores (SLURM,
+  not `taskset`, does the fair-sharing here).
+- **`lrz`** requests the **whole node** (`--exclusive`), because SuperMUC-NG
+  allocates and accounts per *complete node* — there is no fractional slice to
+  request. Its preset stays `num_gpus=8`, so `run_benchmarks.py` pins one tile
+  and `taskset`s to 1/8 of the node's cores itself.
 
 ## What each preset controls
 

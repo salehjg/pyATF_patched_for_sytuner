@@ -86,6 +86,16 @@ MACHINES = {
     # level_zero devices. We pin to a SINGLE tile (FLAT hierarchy, device 0) and
     # take 1/8 of the cores.
     'lrz':      dict(device_kind='level_zero', dpcpp_target='intel:pvc',     num_gpus=8),
+    # CINECA Leonardo "Booster": 4x NVIDIA A100 (64GB, Ampere sm_80), 32 cores.
+    # num_gpus=1: the suite runs on ONE A100 and uses EVERY core in its affinity
+    # mask -- no taskset subdivision. On Leonardo we deliberately request only a
+    # 1-GPU slice from SLURM (--gres=gpu:1 --cpus-per-task=8), so CINECA's
+    # max(gpu,cpu,mem)-fraction billing charges 1/4 of a node, and the mask is
+    # already those 8 cores: SLURM does the fair-sharing, not us. Dividing again
+    # (num_gpus=4) would leave just 8//4 = 2 cores. cuda needs no positional GPU
+    # pinning -- SLURM exposes only the one allocated A100 to the job. Launched
+    # via sbatch.leonardo.a100.sh.
+    'leonardo': dict(device_kind='cuda',       dpcpp_target='nvidia:sm_80',  num_gpus=1),  # 1-GPU A100 slice (Ampere)
 }
 
 
