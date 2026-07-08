@@ -77,10 +77,11 @@ static constexpr int kRegTileN = REG_TILE_N;
 static constexpr int kBlockX   = kTileN / kRegTileN;
 static constexpr int kBlockY   = kTileM / kRegTileM;
 
-// Same problem size as SyTuner's own standalone driver default.
-static constexpr int M = 8192;
-static constexpr int N = 8192;
-static constexpr int K = 8192;
+// Same problem size as SyTuner's campaign runner (runme_common.py passes
+// --size 2048 to tune_matmul.py; the tune script's standalone default is 8192).
+static constexpr int M = 2048;
+static constexpr int N = 2048;
+static constexpr int K = 2048;
 
 class TiledMatMulKernel {
 public:
@@ -255,14 +256,16 @@ int main() {
 }
 '''
 
-PROBLEM_SIZE = {'problem_M': 8192, 'problem_N': 8192, 'problem_K': 8192}
+PROBLEM_SIZE = {'problem_M': 2048, 'problem_N': 2048, 'problem_K': 2048}
 
-# device limits for this machine (RTX 2000 Ada) -- SyTuner queries these live
-# off the SYCL device (sytuner.query_device_limits()); pyATF has no built-in
-# equivalent for the SYCL backends yet, so hardcoding what was actually
-# queried here. Swap these for your own device's numbers.
-MAX_WORKGROUP_SIZE = 1024
-MAX_SHARED_MEMORY  = 49152  # bytes
+# Device limits that bound the search space, queried off the live SYCL device
+# via a compiled probe (the pyATF-side equivalent of SyTuner's
+# sytuner.query_device_limits()). Never hardcode these: 48 KB shared memory is
+# not universal (NVIDIA: 48 KB, MI100: 64 KB, Max 1550: 128 KB). Overridable
+# with --max-workgroup-size / --max-shared-memory.
+DEVICE_LIMITS = bench.get_device_limits(COMPILER, args)
+MAX_WORKGROUP_SIZE = DEVICE_LIMITS['max_workgroup_size']
+MAX_SHARED_MEMORY  = DEVICE_LIMITS['max_shared_memory']  # bytes
 
 # Step 1: Generate the Search Space (same 6 tunables + restrictions as
 # SyTuner's MatmulTunerBase.tune_params()/restrictions())
@@ -306,6 +309,7 @@ for run_idx in range(args.runs):
                                       bench.read_device_name(paths['device_file']), paths['log_file'],
                                       config, min_cost, tuning_data)
     result.update(PROBLEM_SIZE)
+    result.update(DEVICE_LIMITS)
     bench.write_result_json(paths['result_file'], **result)
 
     print(f'run {run_idx}: min_cost={min_cost}, config={config}')

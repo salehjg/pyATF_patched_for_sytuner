@@ -237,21 +237,26 @@ int main() {
 PROBLEM_SIZE = {'problem_image_height': 4096, 'problem_image_width': 4096,
                 'problem_filter_height': 17, 'problem_filter_width': 17}
 
-# device limits for this machine (RTX 2000 Ada), see dpcpp__matmul.py
-MAX_WORKGROUP_SIZE = 1024
-MAX_SHARED_MEMORY  = 49152  # bytes
-IMAGE_HEIGHT = IMAGE_WIDTH = 4096
+# Device limits, queried off the live SYCL device -- see get_device_limits()
+# in _bench_common.py (48 KB shared memory is not universal; Max 1550 has 128 KB).
+DEVICE_LIMITS = bench.get_device_limits(COMPILER, args)
+MAX_WORKGROUP_SIZE = DEVICE_LIMITS['max_workgroup_size']
+MAX_SHARED_MEMORY  = DEVICE_LIMITS['max_shared_memory']  # bytes
 
 # Step 1: Generate the Search Space (same 4 tunables + restrictions as
-# SyTuner's Conv2dTunerBase.tune_params()/restrictions())
-BLOCK_SIZE_X = TP('BLOCK_SIZE_X', Set(*[16 * i for i in range(1, 9)]))   # 16,32,...,128
-BLOCK_SIZE_Y = TP('BLOCK_SIZE_Y', Set(*[2 ** i for i in range(6)]))     # 1,2,4,8,16,32
-TILE_SIZE_X  = TP('TILE_SIZE_X',  Set(1, 2, 4),
-                  lambda BLOCK_SIZE_X, TILE_SIZE_X: IMAGE_WIDTH % (BLOCK_SIZE_X * TILE_SIZE_X) == 0)
-TILE_SIZE_Y  = TP('TILE_SIZE_Y',  Set(1, 2, 4),
+# SyTuner's Conv2dTunerBase.tune_params()/restrictions()). Note: SyTuner
+# intentionally dropped the image-divisibility restrictions -- the kernel
+# bounds-checks loads/stores and launches with ceil-division grids, so
+# non-divisible block/tile sizes are correct (the last block is partially
+# masked). The only restrictions are the work-group-size limit, the shared-
+# memory limit, and the per-thread register-tile cap.
+BLOCK_SIZE_X = TP('BLOCK_SIZE_X', Set(*range(16, 257, 16)))             # 16,32,...,256
+BLOCK_SIZE_Y = TP('BLOCK_SIZE_Y', Set(1, 2, 4, 8, 16, 32, 64),
+                  lambda BLOCK_SIZE_X, BLOCK_SIZE_Y: BLOCK_SIZE_X * BLOCK_SIZE_Y <= MAX_WORKGROUP_SIZE)
+TILE_SIZE_X  = TP('TILE_SIZE_X',  Set(*range(1, 13)))                   # 1..12
+TILE_SIZE_Y  = TP('TILE_SIZE_Y',  Set(*range(1, 13)),                  # 1..12
                   lambda BLOCK_SIZE_X, BLOCK_SIZE_Y, TILE_SIZE_X, TILE_SIZE_Y:
-                      IMAGE_HEIGHT % (BLOCK_SIZE_Y * TILE_SIZE_Y) == 0
-                      and BLOCK_SIZE_X * BLOCK_SIZE_Y <= MAX_WORKGROUP_SIZE
+                      TILE_SIZE_X * TILE_SIZE_Y <= 64
                       and (BLOCK_SIZE_Y * TILE_SIZE_Y + 16) * (BLOCK_SIZE_X * TILE_SIZE_X + 16) * 4 <= MAX_SHARED_MEMORY)
 
 # Step 2 & 3: repeat the whole autotuning procedure from scratch --runs times
@@ -281,6 +286,7 @@ for run_idx in range(args.runs):
                                       bench.read_device_name(paths['device_file']), paths['log_file'],
                                       config, min_cost, tuning_data)
     result.update(PROBLEM_SIZE)
+    result.update(DEVICE_LIMITS)
     bench.write_result_json(paths['result_file'], **result)
 
     print(f'run {run_idx}: min_cost={min_cost}, config={config}')

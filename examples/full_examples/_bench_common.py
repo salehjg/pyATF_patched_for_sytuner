@@ -10,7 +10,10 @@ that's worth getting right once rather than six times.
 """
 import argparse
 import json
+import shutil
 import socket
+import sys
+import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -50,7 +53,76 @@ def add_common_args(parser: argparse.ArgumentParser, compiler: str, default_outp
                             help=f'acpp.py --acpp-targets value (default: {DEFAULT_ACPP_TARGETS})')
     else:
         raise ValueError(f'unknown compiler: {compiler}')
+    parser.add_argument('--max-workgroup-size', type=int, default=None,
+                        help='Override the device max work-group size instead of '
+                             'querying it off the live SYCL device')
+    parser.add_argument('--max-shared-memory', type=int, default=None,
+                        help='Override the device local/shared memory size in BYTES '
+                             'instead of querying it off the live SYCL device')
     return parser
+
+
+# Tiny SYCL program printing the two device limits that bound every
+# benchmark's search space. It is compiled and run through the SAME
+# cost-function plumbing (compiler, targets, toolchain flags, runtime env) as
+# the benchmark itself, so the device being asked is exactly the one the
+# tuning will run on.
+_LIMITS_PROBE_SOURCE = '''
+#include <sycl/sycl.hpp>
+#include <fstream>
+int main() {
+    sycl::queue q{ sycl::gpu_selector_v };
+    auto dev = q.get_device();
+    std::ofstream out("__LIMITS_FILE_PATH__");
+    out << dev.get_info<sycl::info::device::max_work_group_size>() << ' '
+        << dev.get_info<sycl::info::device::local_mem_size>() << '\\n';
+    return 0;
+}
+'''
+
+
+def get_device_limits(compiler: str, args: argparse.Namespace) -> Dict[str, int]:
+    """{max_workgroup_size, max_shared_memory} of the live SYCL device.
+
+    The pyATF-side equivalent of SyTuner's sytuner.query_device_limits(): the
+    same two SYCL queries (max_work_group_size, local_mem_size), answered by
+    the live device. Hardcoding is wrong here -- 48 KB shared memory is NOT
+    universal (the NVIDIA cards report 48 KB, but MI100 has 64 KB and the
+    Max 1550 128 KB), and a too-small value silently shrinks the search space.
+    Like SyTuner, there is no silent fallback: if the probe cannot run, the
+    limits must be given explicitly (--max-workgroup-size/--max-shared-memory,
+    which also override a successful query).
+    """
+    overrides = {'max_workgroup_size': args.max_workgroup_size,
+                 'max_shared_memory': args.max_shared_memory}
+    if all(v is not None for v in overrides.values()):
+        print(f'device limits (CLI overrides): {overrides}')
+        return overrides
+
+    tmpdir = tempfile.mkdtemp(prefix='pyatf_devlimits_')
+    limits_path = Path(tmpdir) / 'limits.txt'
+    probe_source = _LIMITS_PROBE_SOURCE.replace('__LIMITS_FILE_PATH__', str(limits_path))
+    try:
+        if compiler == 'dpcpp':
+            from pyatf.cost_functions import dpcpp
+            probe = dpcpp.CostFunction(probe_source).target(args.target)
+        else:
+            from pyatf.cost_functions import acpp
+            probe = acpp.CostFunction(probe_source).targets(args.acpp_targets)
+        probe({})  # no tunables -- just compile the probe once and run it
+        wg, slm = limits_path.read_text().split()
+        limits = {'max_workgroup_size': int(wg), 'max_shared_memory': int(slm)}
+    except Exception as e:
+        sys.exit(f'ERROR: could not query the SYCL device for its limits ({e}).\n'
+                 'Refusing to guess a search space. Pass --max-workgroup-size and\n'
+                 '--max-shared-memory (bytes) explicitly instead.')
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    limits.update({k: v for k, v in overrides.items() if v is not None})
+    print(f'device limits (queried live): max_workgroup_size={limits["max_workgroup_size"]}, '
+          f'max_shared_memory={limits["max_shared_memory"]} bytes')
+    return limits
 
 
 def new_session_id() -> str:

@@ -260,8 +260,10 @@ int main() {
 
 PROBLEM_SIZE = {'problem_num_points': 20000000, 'problem_vertices': 600}
 
-# device limits for this machine (RTX 2000 Ada), see dpcpp__matmul.py
-MAX_WORKGROUP_SIZE = 1024
+# Device limit, queried off the live SYCL device -- see get_device_limits()
+# in _bench_common.py (pnpoly's restrictions only need the work-group bound).
+DEVICE_LIMITS = bench.get_device_limits(COMPILER, args)
+MAX_WORKGROUP_SIZE = DEVICE_LIMITS['max_workgroup_size']
 NUM_POINTS = 20_000_000
 
 # Step 1: Generate the Search Space (same 5 tunables + restrictions as
@@ -303,6 +305,7 @@ for run_idx in range(args.runs):
                                       bench.read_device_name(paths['device_file']), paths['log_file'],
                                       config, min_cost, tuning_data)
     result.update(PROBLEM_SIZE)
+    result.update(DEVICE_LIMITS)
     bench.write_result_json(paths['result_file'], **result)
 
     print(f'run {run_idx}: min_cost={min_cost}, config={config}')
