@@ -42,6 +42,7 @@ MATMUL_SOURCE_TEMPLATE = '''
 #include <vector>
 #include <algorithm>
 #include <fstream>
+#include <chrono>
 
 #ifndef TILE_M
 #define TILE_M 64
@@ -187,12 +188,35 @@ int main() {
 
     for (int w = 0; w < WARMUP_RUNS; ++w) launch().wait();
 
+    // Some backends (e.g. AdaptiveCpp's Level Zero backend on Intel GPUs)
+    // accept enable_profiling but expose no device execution timestamps and
+    // throw from get_profiling_info. Probe once, then fall back to host-side
+    // chrono timing so a measurement never crashes -- mirrors SyTuner's
+    // ExecutionManager::probeEventTiming + useEventTiming fallback.
+    const bool event_timing_available = [&]() -> bool {
+        try {
+            auto ev = q.single_task([]() {});
+            ev.wait();
+            auto s = ev.get_profiling_info<sycl::info::event_profiling::command_start>();
+            auto e = ev.get_profiling_info<sycl::info::event_profiling::command_end>();
+            return e >= s;
+        } catch (...) {
+            return false;
+        }
+    }();
+
     std::vector<double> times_ns;
     for (int run = 0; run < MEASUREMENT_RUNS; ++run) {
+        auto host_start = std::chrono::high_resolution_clock::now();
         auto ev = launch();
         ev.wait();
-        times_ns.push_back((double)(ev.get_profiling_info<sycl::info::event_profiling::command_end>()
-                                   - ev.get_profiling_info<sycl::info::event_profiling::command_start>()));
+        auto host_end = std::chrono::high_resolution_clock::now();
+        if (event_timing_available) {
+            times_ns.push_back((double)(ev.get_profiling_info<sycl::info::event_profiling::command_end>()
+                                       - ev.get_profiling_info<sycl::info::event_profiling::command_start>()));
+        } else {
+            times_ns.push_back((double)std::chrono::duration_cast<std::chrono::nanoseconds>(host_end - host_start).count());
+        }
     }
     std::sort(times_ns.begin(), times_ns.end());
     double median_ns = times_ns[times_ns.size() / 2];
