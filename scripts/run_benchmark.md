@@ -24,8 +24,8 @@ launcher keeps its old defaults (`nvidia:sm_89`, all cores, no GPU pinning).
 | `p16g2`    | RTX 2000 Ada               | `nvidia:sm_89`  | `generic` | all | — |
 | `darkserv` | RTX 5060 Ti (Blackwell)    | `nvidia:sm_120` | `generic` | all | — |
 | `albori`   | Arc A770 (DG2/Alchemist)   | `intel:dg2`     | `generic` | all | — |
-| `lrz`      | 4× Data Center GPU Max 1550 (Ponte Vecchio) | `intel:pvc` | `generic` | total ÷ 8 | one tile (`FLAT`, device 0) |
-| `leonardo` | A100 (Ampere), 1-GPU slice | `nvidia:sm_80`  | `generic` | all allocated | — (SLURM exposes one GPU) |
+| `lrz`      | 4× Data Center GPU Max 1550 (Ponte Vecchio) | `intel:pvc` | `generic` | 6 (hard cap) | one tile (`FLAT`, device 0) |
+| `leonardo` | A100 (Ampere), 1-GPU slice | `nvidia:sm_80`  | `generic` | 8 (hard cap) | — (SLURM exposes one GPU) |
 
 The table lives in `MACHINES` at the top of `run_benchmarks.py`; add a host by
 adding a row.
@@ -62,13 +62,14 @@ differently:
 - **`leonardo`** requests a **1/4-node slice** — `--gres=gpu:1 --cpus-per-task=8
   --mem=120G`, no `--exclusive`. The suite only ever uses one A100, and CINECA
   bills the *max* of the (GPU, CPU, memory) node-fractions, so a 1-GPU slice
-  costs 1/4 of a node-hour, not a whole one. The `leonardo` preset is
-  `num_gpus=1` so `run_benchmarks.py` uses all 8 SLURM-allocated cores (SLURM,
-  not `taskset`, does the fair-sharing here).
+  costs 1/4 of a node-hour, not a whole one. The `leonardo` preset sets
+  `taskset_cores=8`, a hard cap: with a `--cpus-per-task=8` slice that's every
+  allocated core, but if the job is ever handed more, `taskset` still clamps it
+  to 8.
 - **`lrz`** requests the **whole node** (`--exclusive`), because SuperMUC-NG
   allocates and accounts per *complete node* — there is no fractional slice to
-  request. Its preset stays `num_gpus=8`, so `run_benchmarks.py` pins one tile
-  and `taskset`s to 1/8 of the node's cores itself.
+  request. Its preset sets `taskset_cores=6` (1/8 of the 48-core node), so
+  `run_benchmarks.py` pins one tile and `taskset`s the compiles to 6 cores.
 
 ## What each preset controls
 
@@ -91,25 +92,25 @@ There is no per-machine acpp target to set.
 ### 3. CPU cores for compilation
 
 The acpp/dpcpp compiles are what actually consume CPU. How many cores a run may
-use follows the rule in
-[`docs/notes/cpu-core-pinning-taskset.md`](../../../docs/notes/cpu-core-pinning-taskset.md):
+use is set per machine by an explicit **`taskset_cores`** hard cap (see
+[`docs/notes/cpu-core-pinning-taskset.md`](../../../docs/notes/cpu-core-pinning-taskset.md)):
 
-> **(cores this process is allowed to use) ÷ (number of parallel GPU slots)**
+- **Uncapped hosts** (every machine except `lrz`/`leonardo`): no `taskset_cores`,
+  so a run gets **every allocated core**. No `taskset` is used at all — the
+  default affinity is already the whole allocation, and there's no dependency on
+  `taskset` being installed.
+- **Capped hosts** (`lrz` → 6, `leonardo` → 8): each benchmark subprocess is
+  wrapped in `taskset -c <share>`, where the share is the **first `N`** ids of
+  the affinity mask (`N` = the cap). It's a *hard* cap: if fewer than `N` cores
+  are allocated, the run just uses whatever it was given. On `lrz`'s 48-core
+  `--exclusive` node that's `taskset -c 0-5`, a 1/8 CPU slice so the run doesn't
+  oversubscribe cores a peer job on another tile would want.
 
-- **Single-GPU hosts** (`num_gpus = 1`): the divisor is 1, so a run gets **every
-  core**. No `taskset` is used at all — the default affinity is already the whole
-  machine, and there's no dependency on `taskset` being installed.
-- **Multi-GPU hosts** (`lrz`, `num_gpus = 8`): each benchmark subprocess is
-  wrapped in `taskset -c <share>`, where the share is the first
-  `allowed_cores ÷ 8` of the affinity mask. On a 48-core node that's
-  `taskset -c 0-5` (6 cores). Even though we run on one GPU, we take only a
-  1/8 CPU slice so the run doesn't oversubscribe cores a peer job on another
-  tile would want.
-
-The allowed-core count is read **live** from the process affinity mask
-(`/proc/self/status` → `Cpus_allowed_list`, falling back to `os.cpu_count()`);
-no per-machine core count is hardcoded. A non-contiguous mask (e.g.
-`0-3,32-35`) is honored exactly.
+The affinity mask is read **live** (`/proc/self/status` → `Cpus_allowed_list`,
+falling back to `os.cpu_count()`); no per-machine core *list* is hardcoded, only
+the cap count. A **sparse / non-contiguous** allocation (e.g. `0,1,2,5,6,7,12,30`)
+is honored exactly — we take the first `N` of *those* ids and `taskset` to them,
+gaps preserved (`0-2,5-7` for `N=6`).
 
 ### 4. acpp backend confinement (every machine)
 
@@ -155,10 +156,10 @@ no usable `g++` is on `PATH`. It complements the existing `--cuda-path` and
 
 > **Why a tile, not a whole card?** A `gpu_selector` picks one device = one
 > tile under `FLAT`, giving a clean single-compute-tile measurement, and the
-> ÷8 core share fair-shares against per-tile jobs on the shared node. This
-> matches the reference runme (`num_gpus = 8`). To instead treat a physical
-> card as "the GPU" you'd switch to `COMPOSITE` and ÷4 — not the current
-> default.
+> 6-core cap (1/8 of the 48-core node) fair-shares against per-tile jobs on the
+> shared node. This matches the reference runme (`num_gpus = 8`). To instead
+> treat a physical card as "the GPU" you'd select `COMPOSITE` and bump the cap to
+> 12 (1/4 of the node) — not the current default.
 
 ## Overrides
 
@@ -168,14 +169,14 @@ no usable `g++` is on `PATH`. It complements the existing `--cuda-path` and
 # Use furore's core/GPU handling but force a different dpcpp target:
 python scripts/run_benchmarks.py --machine furore --target nvidia:sm_80
 
-# Quick smoke test on lrz (still one tile, still ÷8 cores):
+# Quick smoke test on lrz (still one tile, still 6 cores):
 python scripts/run_benchmarks.py --machine lrz --max-fevals 10 --runs 1
 ```
 
 `--target` overrides the dpcpp target; `--acpp-targets` overrides the acpp
-target. The CPU/GPU pinning follows the machine's `num_gpus` and can't be
-overridden per-invocation (change the `MACHINES` row if a host's layout
-changes).
+target. The CPU cap follows the machine's `taskset_cores` and the GPU pinning its
+`num_gpus`; neither can be overridden per-invocation (change the `MACHINES` row if
+a host's layout changes).
 
 ## What the run records
 

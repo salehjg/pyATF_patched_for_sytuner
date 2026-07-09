@@ -17,8 +17,9 @@ and running two at once would skew both their timing measurements.
 
 `--machine` is REQUIRED: it picks the right dpcpp AoT `--target` for that GPU,
 pins the run to a single GPU, and caps the CPU cores used for compilation to this
-box's fair share (whole machine for single-GPU hosts, total/num_gpus for
-multi-GPU ones). See MACHINES below and docs/notes/cpu-core-pinning-taskset.md.
+box's fair share (every allocated core by default; an explicit hard cap of 6 on
+lrz and 8 on leonardo, the shared SLURM nodes that can hand us more cores than our
+fair share). See MACHINES below and docs/notes/cpu-core-pinning-taskset.md.
 
 Usage:
     python scripts/run_benchmarks.py --machine furore
@@ -59,18 +60,21 @@ BENCHMARKS = [
     ('acpp', 'pnpoly', FULL_EXAMPLES / 'acpp__pnpoly' / 'acpp__pnpoly.py'),
 ]
 
-# One --machine value == the full arg preset for that host. Only two things
-# actually vary between machines:
+# One --machine value == the full arg preset for that host. What varies:
 #   * dpcpp_target -- the dpcpp AoT --target for that GPU (an entry in
 #     pyatf.cost_functions.dpcpp._TARGETS). acpp is ALWAYS 'generic': its SSCP
 #     JIT specializes for the live device at runtime, so one value fits every
 #     backend.
-#   * num_gpus -- the box's parallel-GPU count. We always run on ONE GPU; this
-#     is used ONLY to size this run's CPU-core share for compilation:
-#     (allowed cores) // num_gpus. Single-GPU hosts (num_gpus=1) get every core;
-#     multi-GPU hosts get a 1/num_gpus slice via taskset, so a run doesn't
-#     oversubscribe cores that a peer job on another GPU would want. See
+#   * taskset_cores -- an explicit HARD CAP on the CPU cores a run may use for
+#     its compiles, enforced with taskset. Set ONLY for the shared SLURM nodes
+#     that can hand us more cores than our fair share: lrz -> 6, leonardo -> 8.
+#     Omitted everywhere else, meaning "use every allocated core" (no taskset at
+#     all). The cap is taken from the FRONT of the live affinity mask, so a
+#     sparse SLURM allocation (e.g. 0,1,2,5,6,7,12,30) is honored exactly. See
 #     docs/notes/cpu-core-pinning-taskset.md.
+#   * num_gpus -- the box's parallel-GPU count. We always run on ONE GPU; this
+#     is used ONLY to decide single-GPU device pinning for multi-device Level
+#     Zero (see device_env), NOT for CPU-core sizing.
 # 'device_kind' ('cuda'|'hip'|'level_zero') confines AdaptiveCpp to this host's
 # backend (see device_env) and marks which hosts need explicit single-GPU
 # pinning (only multi-device Level Zero, i.e. lrz).
@@ -82,18 +86,19 @@ MACHINES = {
     'albori':   dict(device_kind='level_zero', dpcpp_target='intel:dg2',     num_gpus=1),  # Arc A770 (DG2/Alchemist)
     # 4x Data Center GPU Max 1550 (Ponte Vecchio), each exposing 2 tiles => 8
     # level_zero devices. We pin to a SINGLE tile (FLAT hierarchy, device 0) and
-    # take 1/8 of the cores.
-    'lrz':      dict(device_kind='level_zero', dpcpp_target='intel:pvc',     num_gpus=8),
+    # hard-cap the compiles to 6 cores (taskset_cores) -- 1/8 of the 48-core node
+    # requested --exclusive, so a run doesn't oversubscribe cores a peer job on
+    # another tile would want.
+    'lrz':      dict(device_kind='level_zero', dpcpp_target='intel:pvc',     num_gpus=8, taskset_cores=6),
     # CINECA Leonardo "Booster": 4x NVIDIA A100 (64GB, Ampere sm_80), 32 cores.
-    # num_gpus=1: the suite runs on ONE A100 and uses EVERY core in its affinity
-    # mask -- no taskset subdivision. On Leonardo we deliberately request only a
-    # 1-GPU slice from SLURM (--gres=gpu:1 --cpus-per-task=8), so CINECA's
-    # max(gpu,cpu,mem)-fraction billing charges 1/4 of a node, and the mask is
-    # already those 8 cores: SLURM does the fair-sharing, not us. Dividing again
-    # (num_gpus=4) would leave just 8//4 = 2 cores. cuda needs no positional GPU
-    # pinning -- SLURM exposes only the one allocated A100 to the job. Launched
-    # via sbatch.leonardo.a100.sh.
-    'leonardo': dict(device_kind='cuda',       dpcpp_target='nvidia:sm_80',  num_gpus=1),  # 1-GPU A100 slice (Ampere)
+    # The suite runs on ONE A100. taskset_cores=8 hard-caps the compiles to 8
+    # cores: normally Leonardo is requested as a 1-GPU slice (--gres=gpu:1
+    # --cpus-per-task=8) so CINECA's max(gpu,cpu,mem)-fraction billing charges
+    # 1/4 of a node and the affinity mask is already 8 cores -- the cap just
+    # makes that explicit; if the job is ever given more cores, it still stays at
+    # 8. num_gpus=1: cuda needs no positional GPU pinning -- SLURM exposes only
+    # the one allocated A100 to the job. Launched via sbatch.leonardo.a100.sh.
+    'leonardo': dict(device_kind='cuda',       dpcpp_target='nvidia:sm_80',  num_gpus=1, taskset_cores=8),  # 1-GPU A100 slice (Ampere)
 }
 
 
@@ -132,13 +137,15 @@ def compress_cpus(cpus):
     return ','.join(parts)
 
 
-def core_cpuset(num_gpus):
-    """This run's CPU-core share as a taskset -c spec: the first
-    (allowed cores)//num_gpus of the affinity mask. num_gpus==1 -> the whole
-    allowed set (single-GPU hosts use every core)."""
+def core_cpuset(n_cores):
+    """This run's CPU-core share as a taskset -c spec: the first `n_cores` ids
+    of the live affinity mask (available_cpus()). `n_cores` is a HARD CAP -- if
+    fewer cores are allowed, every allowed core is used. A sparse mask
+    (e.g. 0,1,2,5,6,7,12,30) is honored: we take the first `n_cores` of the
+    allowed ids, gaps and all, and compress_cpus renders them without ever
+    spanning a gap in the mask."""
     cpus = available_cpus()
-    per = max(1, len(cpus) // num_gpus)
-    return compress_cpus(cpus[:per])
+    return compress_cpus(cpus[:max(1, n_cores)])
 
 
 def device_env(machine_cfg, compiler):
@@ -201,10 +208,14 @@ def main():
     machine_cfg = MACHINES[args.machine]
     dpcpp_target = args.target or machine_cfg.get('dpcpp_target', DEFAULT_DPCPP_TARGET)
     acpp_targets = args.acpp_targets or DEFAULT_ACPP_TARGETS
-    num_gpus = machine_cfg.get('num_gpus', 1)
-    # taskset only when we actually subdivide (multi-GPU hosts); single-GPU
-    # hosts keep the default all-cores affinity and don't need taskset present.
-    cpuset = core_cpuset(num_gpus) if num_gpus > 1 else None
+    # CPU-core cap for the compiles: an explicit per-machine HARD CAP
+    # (taskset_cores) -- 6 on lrz, 8 on leonardo -- so a run never uses more than
+    # its fair share of a shared / over-allocated SLURM node. Machines without a
+    # cap keep the default all-cores affinity and don't need taskset present. The
+    # cap is taken from the FRONT of the live affinity mask, so a sparse SLURM
+    # allocation (e.g. 0,1,2,5,6,7,12,30) is honored exactly.
+    taskset_cores = machine_cfg.get('taskset_cores')  # None -> all cores, no taskset
+    cpuset = core_cpuset(taskset_cores) if taskset_cores else None
     taskset_prefix = ['taskset', '-c', cpuset] if cpuset else []
 
     session = uuid.uuid4().hex[:8]
@@ -214,7 +225,7 @@ def main():
     print(f'Session     : {session}')
     print(f'Machine     : {args.machine}')
     print(f'dpcpp target: {dpcpp_target}   acpp targets: {acpp_targets}')
-    print(f'CPU cores   : {cpuset or "all (single GPU)"}')
+    print(f'CPU cores   : {cpuset or "all allocated (no cap)"}')
     print(f'Output dir  : {output_dir}')
     print(f'Running {len(BENCHMARKS)} benchmark(s) sequentially '
          f'(GPU timing isolation -- not parallelized on purpose)')
