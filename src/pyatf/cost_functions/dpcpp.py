@@ -174,8 +174,13 @@ class CostFunction:
         bin_path = Path(self._workdir) / 'program'
         src_path.write_text(self._source)
 
+        # -O3 to MATCH acpp.py (which pins -O3): clang++ -fsycl defaults to -O2,
+        # not -O0, so this looked unnecessary -- but -O2 under-optimizes branchy
+        # kernels (measured on sm_120: pnpoly ~1.45x slower at -O2 than -O3, which
+        # alone flipped the acpp/dpcpp verdict). Both toolchains must compile at the
+        # same -O3 or the cross-compiler comparison is invalid.
         # -fuse-ld=lld dodges a glibc/conda toolchain conflict in the default linker
-        argv = [self._compiler, '-fsycl', '-fuse-ld=lld',
+        argv = [self._compiler, '-fsycl', '-fuse-ld=lld', '-O3',
                 *self._toolchain_flags, *self._target_flags, *self._extra_flags]
         for tp_name, tp_value in configuration.items():
             argv.append(f'-D{tp_name}={tp_value}')

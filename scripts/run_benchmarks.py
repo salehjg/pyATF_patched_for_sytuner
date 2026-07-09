@@ -15,16 +15,14 @@ someone edited a default somewhere else. See docs/notes/benchmark-ports.md.
 Runs the 6 benchmarks SEQUENTIALLY, on purpose: they all target the same GPU,
 and running two at once would skew both their timing measurements.
 
-The one thing you normally DO need to set per host is `--machine`: it picks the
-right dpcpp AoT `--target` for that GPU, pins the run to a single GPU, and caps
-the CPU cores used for compilation to this box's fair share (whole machine for
-single-GPU hosts, total/num_gpus for multi-GPU ones). See MACHINES below and
-docs/notes/cpu-core-pinning-taskset.md.
+`--machine` is REQUIRED: it picks the right dpcpp AoT `--target` for that GPU,
+pins the run to a single GPU, and caps the CPU cores used for compilation to this
+box's fair share (whole machine for single-GPU hosts, total/num_gpus for
+multi-GPU ones). See MACHINES below and docs/notes/cpu-core-pinning-taskset.md.
 
 Usage:
     python scripts/run_benchmarks.py --machine furore
     python scripts/run_benchmarks.py --machine lrz --max-fevals 10 --runs 1  # quick smoke test
-    python scripts/run_benchmarks.py                                          # no host preset
 """
 import argparse
 import json
@@ -181,13 +179,13 @@ def main():
     parser.add_argument('--warmup-runs', type=int, default=DEFAULT_WARMUP_RUNS)
     parser.add_argument('--measurement-runs', type=int, default=DEFAULT_MEASUREMENT_RUNS)
     parser.add_argument('--runs', type=int, default=DEFAULT_RUNS)
-    parser.add_argument('--machine', choices=sorted(MACHINES),
-                        help='Host preset: sets the dpcpp --target for this GPU, pins to '
-                             'a single GPU, and caps compile cores to this box\'s share '
-                             '(see MACHINES).')
+    parser.add_argument('--machine', required=True, choices=sorted(MACHINES),
+                        help='REQUIRED. Host preset: sets the dpcpp --target for this GPU, '
+                             'pins to a single GPU, and caps compile cores to this box\'s '
+                             'share (see MACHINES).')
     parser.add_argument('--target', default=None,
-                        help=f'dpcpp.py AoT target (overrides --machine; '
-                             f'default without --machine: {DEFAULT_DPCPP_TARGET})')
+                        help=f'dpcpp.py AoT target (overrides the --machine preset; '
+                             f'preset default if unset)')
     parser.add_argument('--acpp-targets', default=None,
                         help=f'acpp.py --acpp-targets value (default: {DEFAULT_ACPP_TARGETS})')
     parser.add_argument('--output-dir', type=Path, default=None,
@@ -197,11 +195,10 @@ def main():
                         help=f'Where to write the results zip (default: {DEFAULT_RESULTS_BASE})')
     args = parser.parse_args()
 
-    # Resolve the compiler targets and the single-GPU CPU/device pinning. An
-    # explicit --machine supplies the defaults; explicit --target/--acpp-targets
-    # still win over it. Without --machine, fall back to this launcher's own
-    # defaults and run on every core with no device pinning.
-    machine_cfg = MACHINES[args.machine] if args.machine else {}
+    # Resolve the compiler targets and the single-GPU CPU/device pinning. The
+    # (required) --machine supplies the defaults; explicit --target/--acpp-targets
+    # still win over it.
+    machine_cfg = MACHINES[args.machine]
     dpcpp_target = args.target or machine_cfg.get('dpcpp_target', DEFAULT_DPCPP_TARGET)
     acpp_targets = args.acpp_targets or DEFAULT_ACPP_TARGETS
     num_gpus = machine_cfg.get('num_gpus', 1)
@@ -215,7 +212,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f'Session     : {session}')
-    print(f'Machine     : {args.machine or "(none -- launcher defaults)"}')
+    print(f'Machine     : {args.machine}')
     print(f'dpcpp target: {dpcpp_target}   acpp targets: {acpp_targets}')
     print(f'CPU cores   : {cpuset or "all (single GPU)"}')
     print(f'Output dir  : {output_dir}')
