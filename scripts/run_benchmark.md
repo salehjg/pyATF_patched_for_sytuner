@@ -150,9 +150,11 @@ does **not** find a conda-provided gcc on its own — its default GCC scan doesn
 reach `$CONDA_PREFIX/.../x86_64-conda-linux-gnu` — so without this flag even
 `#include <type_traits>` fails and every dpcpp evaluation errors out
 (`min_cost=None`). This is discovered once per `CostFunction` and is a no-op if
-no usable `g++` is on `PATH`. It complements the existing `--cuda-path` and
-`/compat` `LD_LIBRARY_PATH` handling in the same file, and mirrors
-`runme_common`'s `_gcc_install_dir` in the SyTuner tree.
+no usable `g++` is on `PATH`. It complements the existing `--cuda-path` handling
+in the same file, and mirrors `runme_common`'s `_gcc_install_dir` in the SyTuner
+tree. (The cost functions no longer touch `LD_LIBRARY_PATH`: the nvhpc CUDA
+forward-compat libcuda gate lives solely in the toolchain env — `create.env.py` /
+`setvars.all.sh` — which the benchmark just inherits.)
 
 > **Why a tile, not a whole card?** A `gpu_selector` picks one device = one
 > tile under `FLAT`, giving a clean single-compute-tile measurement, and the

@@ -1,4 +1,3 @@
-import os
 import shutil
 import subprocess
 import tempfile
@@ -16,19 +15,6 @@ def source(source: str):
 def path(path: str):
     with open(path, 'r') as f:
         return f.read()
-
-
-def _runtime_env():
-    # nvhpc's CUDA forward-compat libcuda.so is older than the real driver and
-    # shadows it on LD_LIBRARY_PATH, which makes device init fail with
-    # CUDA_ERROR_SYSTEM_DRIVER_MISMATCH -- strip it so the real one is used.
-    # No vendor-specific forcing here (e.g. ACPP_VISIBILITY_MASK) -- that would
-    # undercut the whole point of the generic/JIT flow being vendor-agnostic.
-    # Set it yourself in the environment if you want to force a backend.
-    env = os.environ.copy()
-    ld_library_path = env.get('LD_LIBRARY_PATH', '')
-    env['LD_LIBRARY_PATH'] = ':'.join(p for p in ld_library_path.split(':') if not p.endswith('/compat'))
-    return env
 
 
 class CostFunction:
@@ -77,8 +63,11 @@ class CostFunction:
         if ret.returncode != 0:
             raise CostFunctionError('acpp compile failed: ' + ' '.join(argv))
 
+        # No env manipulation here: the toolchain env (setvars.all.sh) is the
+        # single source of truth -- including the nvhpc CUDA forward-compat
+        # libcuda gate -- so the compiled program just inherits it.
         run_start = time.perf_counter_ns()
-        ret = subprocess.run([str(bin_path)], env=_runtime_env())
+        ret = subprocess.run([str(bin_path)])
         run_end = time.perf_counter_ns()
         if ret.returncode != 0:
             raise CostFunctionError('compiled program exited with non-zero status')
